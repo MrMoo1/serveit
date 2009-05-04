@@ -1,5 +1,18 @@
 #!/usr/bin/env python
 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 import optparse
 import BaseHTTPServer
 import SocketServer
@@ -7,20 +20,33 @@ import shutil
 import os
 import os.path
 import urlparse
+import urllib2
+import mimetypes
 
 usage = "usage: %prog [options] [files]"
 
 class ThreadedHTTPServer(SocketServer.ThreadingMixIn,
 						 BaseHTTPServer.HTTPServer):
+	"""A multithreaded version of BaseHTTPServer."""
 	pass
 
 
 class RequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+	"""An instance of this class is created for each request."""
 	def do_GET(self):
-		path = urlparse.urlparse(self.path)[2].lstrip("/")
-		if path == "":
+		"""Serve a GET request. This either:
+		    -> Sends the root listing, ie. the files/folders passed in
+			   on the command line.
+			-> Sends a directory listing if the user requests a directory.
+			-> Sends a file if the user requests one.
+		"""
+		# Find the path, and strip the leading slash.
+		path = self.pathToFileName(self.path)
+		
+		if path == "./":
 			self.sendRootListing()
 		else:
+			# Find the file name that the iser is interested in.
 			for fName in self.files:
 				if path.startswith(fName):
 					if os.path.isdir(path):
@@ -29,32 +55,71 @@ class RequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 						self.sendFile(path)
 					break
 			else:
+				# Invalid path.
 				self.send404()
 
+	def pathToFileName(self, path):
+		"""Find the file name from the path in the url."""
+		# Find the path, and strip the leading slash.
+		path =urlparse.urlparse(self.path)[2].lstrip("/")
+		# Process url escape codes, and normalize the path.
+		path = os.path.normpath(urllib2.unquote(path))
+		# normpath strips the last slash
+		if os.path.isdir(path):
+			return path + '/'
+		else:
+			return path
+
+	def rootFileNameToPath(self, fName):
+		path = fName.rstrip('/').replace("/", "%2F")
+		if os.path.isdir(fName):
+			return path + '/'
+		else:
+			return pat
+		
 	def sendFile(self, path):
+		"""Send the file at path to the user."""
+		# Either guess the mime type or just send it as a binary file.
+		if self.guessMime:
+			mimeType = mimetypes.guess_type(path)
+		else:
+			mimeType = "application/octet-stream"
+
+		# Send the headers.
 		self.send_response(200)
-		self.send_header("Content-type", "application/octet-stream")
+		self.send_header("Content-type", mimeType)
 		self.send_header("Content-Length", os.path.getsize(path))
 		self.end_headers()
+		
 		f = open(path, 'rb')
+		# self.wfile is the output stream.
 		shutil.copyfileobj(f, self.wfile)
 		f.close()
 
 	def send404(self):
+		"""Send a 'File not found' message."""
 		self.send_error(404, "File not found")
 
 	def sendRootListing(self):
-		self.sendListing(self.files, self.files)
+		"""Send a list of the files available on the server."""
+		# Escape the path to allow for files above the current directory.
+		paths = map(self.rootFileNameToPath, self.files)
+		self.sendListing(self.files, paths)
 		
 	def sendDirectoryListing(self, path):
+		"""Send a listing of path."""
 		dirList = os.listdir(path)
+		# Join the file names to path.
 		paths = [os.path.join(path, fName) for fName in dirList]
-		dirList = [(fName + '/') if os.path.isdir(path) else fName
-				   for fName, path in zip(dirList, paths)]
+		# Add a slash to the directories.
+		dirList = [(fName + '/') if os.path.isdir(fullPath) else fName
+				   for fName, fullPath in zip(dirList, paths)]
+		
 		self.sendListing(dirList, dirList,
 						 "Directory listing for %s" % path)
 
 	def sendListing(self, names, paths, title=''):
+		"""Send a listing by names and paths."""
 		lines = []
 		
 		lines.append("<html>")
@@ -83,21 +148,31 @@ class RequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
 
 def main():
+	"""Parse the command line options, then start the server."""
 	parser = optparse.OptionParser(usage=usage)
+	# The network port to use.
 	parser.add_option("-p", "--port",
 					  dest="port",
 					  default=80,
 					  metavar="PORT",
 					  help="Serve the files from PORT. (Default 80)")
+	# Either guess the mime type, or just serve as binary.
+	parser.add_option("-m", "--no-mime",
+					  dest="mime",
+					  default=True,
+					  action="store_false",
+					  help="Don't try to guess mime types.")
 	
 	(options, files) = parser.parse_args()
-	
-	serve(files, int(options.port))
+	serve(files, int(options.port), options.mime)
 
-def serve(files, port):
+def serve(files, port, mime):
+	"""Start the http server."""
 	print "serving", files, "on", port
+	# Bind to any address.
 	address = ('', port)
-	RequestHandler.files = files
+	RequestHandler.files = files#[fName.rstrip('/') for fName in files]
+	RequestHandler.guessMime = mime
 	httpd = ThreadedHTTPServer(address, RequestHandler)
 	try:
 		httpd.serve_forever()
